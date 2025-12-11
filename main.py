@@ -3,8 +3,7 @@ import os
 import logging
 from datetime import datetime
 from pathlib import Path
-import asyncio
-from telegram import Bot
+import requests
 from threading import Thread
 
 app = Flask(__name__)
@@ -17,8 +16,6 @@ Path(UPLOAD_DIR).mkdir(exist_ok=True)
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-bot = Bot(token=TELEGRAM_TOKEN)
 
 def send_telegram_notification(file_name, file_size, file_path, uploader_info="Unknown"):
     upload_time = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
@@ -39,20 +36,42 @@ def send_telegram_notification(file_name, file_size, file_path, uploader_info="U
         f"👤 Uploader: {uploader_info}"
     )
     
-    async def send():
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {
+            "chat_id": OWNER_ID,
+            "text": notification
+        }
+        response = requests.post(url, json=data)
+        
+        if response.status_code == 200:
+            logger.info(f"Notification sent: {file_name}")
+        else:
+            logger.error(f"Failed to send notification: {response.text}")
+        
+        if os.path.exists(file_path) and file_size > 0:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument"
+            with open(file_path, 'rb') as f:
+                files = {'document': (file_name, f)}
+                data = {'chat_id': OWNER_ID}
+                response = requests.post(url, data=data, files=files)
+                
+                if response.status_code == 200:
+                    logger.info(f"File sent to owner: {file_name}")
+                else:
+                    logger.error(f"Failed to send file: {response.text}")
+        
+    except Exception as e:
+        logger.error(f"Telegram error: {e}")
         try:
-            await bot.send_message(chat_id=OWNER_ID, text=notification)
-            
-            if os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    await bot.send_document(chat_id=OWNER_ID, document=f, filename=file_name)
-            
-            logger.info(f"Sent to owner: {file_name}")
-        except Exception as e:
-            logger.error(f"Telegram error: {e}")
-            await bot.send_message(chat_id=OWNER_ID, text=f"❌ Error sending file: {file_name}\nError: {e}")
-    
-    asyncio.run(send())
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+            data = {
+                "chat_id": OWNER_ID,
+                "text": f"❌ Error sending file: {file_name}\nError: {e}"
+            }
+            requests.post(url, json=data)
+        except:
+            pass
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
